@@ -1,9 +1,15 @@
-"""Async client for Meta AI using reverse-engineered GraphQL endpoints.
+"""Async client for Meta AI using modern OAuth + cookie authentication.
 
-Fail-safe design with multiple auth strategies, cookie persistence,
-automatic retry, and stale-session recovery.
+Based on the metaai-api research, this client communicates directly
+with Meta AI's GraphQL backend using an OAuth access token and
+cookies from the user's browser session.
+
+Authentication:
+    Set META_AI_DATR and META_AI_ECTO_1_SESS in your .env file,
+    or let the client attempt anonymous extraction.
 
 References:
+    https://github.com/mir-ashiq/metaai-api
     https://github.com/Strvm/meta-ai-api
 """
 
@@ -13,6 +19,7 @@ import asyncio
 import contextlib
 import json
 import random
+import re
 import time
 import uuid
 from collections.abc import AsyncGenerator
@@ -34,15 +41,6 @@ from muse_meta.models.chat import (
     Usage,
 )
 
-_PLAYWRIGHT_AVAILABLE = False
-try:
-    from playwright.async_api import async_playwright
-
-    _PLAYWRIGHT_AVAILABLE = True
-except ImportError:
-    pass
-
-
 USER_AGENT = (
     "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
     "AppleWebKit/537.36 (KHTML, like Gecko) "
@@ -50,15 +48,12 @@ USER_AGENT = (
 )
 
 META_AI_BASE = "https://www.meta.ai"
-META_AI_GRAPHQL = f"{META_AI_BASE}/api/graphql/"
-META_AI_GRAPHQL_GRAPH = "https://graph.meta.ai/graphql?locale=user"
+META_AI_GRAPHQL = f"{META_AI_BASE}/api/graphql"
 
-# Relay doc IDs — may change over time; these are current as of research
-doc_ids = {
-    "accept_tos": "7604648749596940",
-    "send_message": "7783822248314888",
-    "fetch_sources": "6946734308765963",
-}
+_CHAT_DOC_IDS = [
+    "ac0bad4b9787a393e160fb39f43404c1",
+    "2f707e4a86f4b01adba97e1376cbdc14",
+]
 
 _MAX_RETRIES = 3
 _BASE_DELAY = 1.0
@@ -76,100 +71,44 @@ def _generate_offline_threading_id() -> str:
     return str((shifted | masked) & max_int)
 
 
-def _extract_value(text: str, start_str: str, end_str: str) -> str:
-    """Extract a substring between two markers."""
-    start = text.find(start_str) + len(start_str)
-    if start < len(start_str):
-        return ""
-    end = text.find(end_str, start)
-    if end == -1:
-        return ""
-    return text[start:end]
-
-
-def _format_bot_response(json_line: dict) -> str:
-    """Extract plain text from a Meta AI response JSON line."""
-    content_list = (
-        json_line.get("data", {})
-        .get("node", {})
-        .get("bot_response_message", {})
-        .get("composed_text", {})
-        .get("content", [])
-    )
-    return "".join(item.get("text", "") for item in content_list)
-
-
 def _jittered_delay(attempt: int) -> float:
-    """Compute exponential backoff delay with jitter.
-
-    Args:
-        attempt: Zero-based retry attempt number.
-
-    Returns:
-        Delay in seconds to wait before next retry.
-    """
-    delay = _BASE_DELAY * (2**attempt)
+    """Compute exponential backoff delay with jitter."""
+    delay = _BASE_DELAY * (2 ** attempt)
     jitter = random.uniform(0, delay * 0.5)
     return delay + jitter
 
 
 @dataclass
 class MetaAISession:
-    """Encapsulates auth state for a single Meta AI session.
-
-    Attributes:
-        access_token: Temporary anonymous token.
-        cookies: Dictionary of cookie key-value pairs.
-        external_conversation_id: UUID for the current conversation.
-        offline_threading_id: Last generated threading ID.
-        is_authenticated: Whether this session uses logged-in cookies.
-        created_at: Unix timestamp when the session was established.
-    """
+    """Encapsulates auth state for a single Meta AI session."""
 
     access_token: str = ""
     cookies: dict[str, str] = field(default_factory=dict)
     external_conversation_id: str = ""
-    offline_threading_id: str = ""
-    is_authenticated: bool = False
     created_at: float = field(default_factory=time.time)
 
     def is_stale(self, max_age_seconds: float = 1800.0) -> bool:
-        """Check if the session is older than the allowed age.
-
-        Args:
-            max_age_seconds: Maximum age before considering stale.
-
-        Returns:
-            True if the session should be refreshed.
-        """
+        """Check if the session is older than the allowed age."""
         return (time.time() - self.created_at) > max_age_seconds
 
     def persist(self) -> None:
         """Save cookie state to disk for reuse across restarts."""
-        try:
+        with contextlib.suppress(OSError):
             payload = {
                 "cookies": self.cookies,
-                "is_authenticated": self.is_authenticated,
                 "created_at": self.created_at,
             }
             _COOKIE_FILE.write_text(json.dumps(payload), encoding="utf-8")
-        except OSError:
-            pass  # Non-critical; continue without persistence
 
     @classmethod
     def load(cls) -> MetaAISession | None:
-        """Restore a session from disk if available and not stale.
-
-        Returns:
-            Restored session, or None if no valid saved session exists.
-        """
+        """Restore a session from disk if available and not stale."""
         if not _COOKIE_FILE.exists():
             return None
         try:
             payload = json.loads(_COOKIE_FILE.read_text(encoding="utf-8"))
             session = cls(
                 cookies=payload.get("cookies", {}),
-                is_authenticated=payload.get("is_authenticated", False),
                 created_at=payload.get("created_at", 0.0),
             )
             if session.is_stale():
@@ -183,8 +122,6 @@ class MetaAISession:
         self.access_token = ""
         self.cookies = {}
         self.external_conversation_id = ""
-        self.offline_threading_id = ""
-        self.is_authenticated = False
         self.created_at = 0.0
         with contextlib.suppress(OSError):
             _COOKIE_FILE.unlink(missing_ok=True)
@@ -193,24 +130,39 @@ class MetaAISession:
 class MuseClient:
     """Async client that proxies OpenAI requests to Meta AI.
 
-    Implements a fail-safe auth chain:
-        1. Try saved session cookies from disk.
-        2. Try Playwright browser extraction.
-        3. Fall back to direct HTTP (likely to 403).
+    Uses OAuth access_token + cookie auth as per modern Meta AI API.
 
-    Handles stale sessions by auto-refreshing cookies and
-    retrying requests with exponential backoff.
+    To authenticate, set these environment variables in your .env:
+        META_AI_DATR=your_datr_cookie
+        META_AI_ECTO_1_SESS=your_ecto_1_sess_cookie
+        META_AI_ACCESS_TOKEN=your_oauth_token (optional)
+
+    Or pass cookies when instantiating the client.
     """
 
     def __init__(self, settings: Settings) -> None:
         """Initialize the client.
 
         Args:
-            settings: App configuration including optional credentials.
+            settings: App configuration with optional cookie values.
         """
         self.settings = settings
         self._http: httpx.AsyncClient | None = None
         self._session = MetaAISession.load() or MetaAISession()
+        self._load_cookies_from_settings()
+
+    def _load_cookies_from_settings(self) -> None:
+        """Read cookie values from environment/settings."""
+        if self.settings.meta_ai_datr:
+            self._session.cookies["datr"] = self.settings.meta_ai_datr
+        if self.settings.meta_ai_ecto_1_sess:
+            self._session.cookies["ecto_1_sess"] = (
+                self.settings.meta_ai_ecto_1_sess
+            )
+        if self.settings.meta_ai_abra_sess:
+            self._session.cookies["abra_sess"] = self.settings.meta_ai_abra_sess
+        if self.settings.meta_ai_access_token:
+            self._session.access_token = self.settings.meta_ai_access_token
 
     async def _get_http(self) -> httpx.AsyncClient:
         """Return or create the shared HTTP client."""
@@ -221,214 +173,159 @@ class MuseClient:
             )
         return self._http
 
-    # ------------------------------------------------------------------
-    # Cookie extraction strategies
-    # ------------------------------------------------------------------
+    def _get_cookie_header(self) -> str:
+        """Build a Cookie header string from session cookies."""
+        return "; ".join(f"{k}={v}" for k, v in self._session.cookies.items())
 
-    async def _extract_cookies(self) -> dict[str, str]:
-        """Extract cookies using the best available strategy.
+    async def _extract_access_token(self) -> str:
+        """Extract OAuth access token from meta.ai page HTML.
+
+        Scans the page source for ecto1:... bearer tokens.
 
         Returns:
-            Dictionary of cookie names to values.
+            The extracted access token.
+
+        Raises:
+            HTTPException: If no token is found.
         """
-        # Strategy 1: Playwright browser (most robust against bot detection)
-        if _PLAYWRIGHT_AVAILABLE:
-            try:
-                cookies = await self._extract_cookies_via_browser()
-                if cookies:
-                    self._session.cookies = cookies
-                    self._session.persist()
-                    return cookies
-            except Exception:
-                pass  # Fallback to next strategy
-
-        # Strategy 2: Direct HTTP (fastest but often blocked)
-        try:
-            cookies = await self._extract_cookies_via_http()
-            if cookies:
-                self._session.cookies = cookies
-                self._session.persist()
-                return cookies
-        except Exception:
-            pass
-
-        # Nothing worked
-        raise HTTPException(
-            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail=(
-                "Unable to extract Meta AI cookies. "
-                "Install Playwright (pip install playwright) for best results."
-            ),
-        )
-
-    async def _extract_cookies_via_http(self) -> dict[str, str]:
-        """Direct HTTP cookie extraction (may 403 on bot detection)."""
         http = await self._get_http()
-        resp = await http.get(META_AI_BASE)
-        resp.raise_for_status()
-        return self._parse_cookies_from_html(resp.text)
-
-    async def _extract_cookies_via_browser(self) -> dict[str, str]:
-        """Use Playwright to visit meta.ai and extract cookies."""
-        async with async_playwright() as p:
-            browser = await p.chromium.launch(headless=True)
-            context = await browser.new_context(
-                viewport={"width": 1280, "height": 800},
-                user_agent=USER_AGENT,
-            )
-            page = await context.new_page()
-            try:
-                resp = await page.goto(
-                    META_AI_BASE,
-                    wait_until="networkidle",
-                    timeout=30000,
-                )
-                if resp is None or resp.status >= status.HTTP_BAD_REQUEST:
-                    raise HTTPException(
-                        status_code=status.HTTP_502_BAD_GATEWAY,
-                        detail="Meta AI blocked the browser request.",
-                    )
-                text = await page.content()
-                cookies = self._parse_cookies_from_html(text)
-
-                # Also harvest HTTP-only cookies from browser storage
-                storage = await context.cookies()
-                interesting = ("datr", "_js_datr", "abra_csrf")
-                for cookie in storage:
-                    name = cookie.get("name", "")
-                    if name in interesting and name not in cookies:
-                        cookies[name] = cookie.get("value", "")
-
-                return cookies
-            finally:
-                await browser.close()
-
-    def _parse_cookies_from_html(self, text: str) -> dict[str, str]:
-        """Parse cookie values embedded in Meta AI HTML source.
-
-        Args:
-            text: Raw HTML page source.
-
-        Returns:
-            Dictionary of cookie key-value pairs.
-        """
-        cookies = {
-            "_js_datr": _extract_value(text, '_js_datr":{"value":"', '",'),
-            "datr": _extract_value(text, 'datr":{"value":"', '",'),
-            "lsd": _extract_value(text, '"LSD",[],{"token":"', '"}'),
-            "fb_dtsg": _extract_value(text, 'DTSGInitData",[],{"token":"', '"'),
+        headers = {
+            "cookie": self._get_cookie_header(),
+            "accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+            "accept-language": "en-US,en;q=0.5",
+            "sec-fetch-dest": "document",
+            "sec-fetch-mode": "navigate",
+            "sec-fetch-site": "none",
+            "sec-fetch-user": "?1",
+            "upgrade-insecure-requests": "1",
         }
+        resp = await http.get(META_AI_BASE, headers=headers)
+        resp.raise_for_status()
 
-        if not (self.settings.meta_username and self.settings.meta_password):
-            cookies["abra_csrf"] = _extract_value(text, 'abra_csrf":{"value":"', '",')
+        # Search for ecto1 token pattern
+        match = re.search(r"ecto1:[a-zA-Z0-9_-]+", resp.text)
+        if match:
+            token = match.group(0)
+            self._session.access_token = token
+            return token
 
-        return {k: v for k, v in cookies.items() if v}
-
-    # ------------------------------------------------------------------
-    # Access token
-    # ------------------------------------------------------------------
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail="Unable to extract Meta AI OAuth token. "
+            "Please set META_AI_ACCESS_TOKEN in your .env file.",
+        )
 
     async def _get_access_token(self) -> str:
-        """Obtain a temporary access token for anonymous use.
-
-        Returns:
-            A valid Meta AI access token string.
-        """
+        """Return existing or freshly extracted access token."""
         if self._session.access_token:
             return self._session.access_token
+        return await self._extract_access_token()
 
-        if not self._session.cookies:
-            await self._extract_cookies()
-
-        http = await self._get_http()
-        payload = {
-            "lsd": self._session.cookies.get("lsd", ""),
-            "fb_api_caller_class": "RelayModern",
-            "fb_api_req_friendly_name": "useAbraAcceptTOSForTempUserMutation",
-            "variables": json.dumps(
-                {
-                    "dob": "1999-01-01",
-                    "icebreaker_type": "TEXT",
-                    "__relay_internal__pv__WebPixelRatiorelayprovider": 1,
-                }
-            ),
-            "doc_id": doc_ids["accept_tos"],
-        }
-        headers = {
-            "content-type": "application/x-www-form-urlencoded",
-            "cookie": (
-                f"_js_datr={self._session.cookies.get('_js_datr', '')}; "
-                f"abra_csrf={self._session.cookies.get('abra_csrf', '')}; "
-                f"datr={self._session.cookies.get('datr', '')};"
-            ),
-            "sec-fetch-site": "same-origin",
-            "x-fb-friendly-name": "useAbraAcceptTOSForTempUserMutation",
-        }
-
-        resp = await http.post(
-            META_AI_GRAPHQL,
-            data=payload,
-            headers=headers,
-        )
-        resp.raise_for_status()
-        data = resp.json()
-
-        try:
-            token = data["data"]["xab_abra_accept_terms_of_service"][
-                "new_temp_user_auth"
-            ]["access_token"]
-        except (KeyError, TypeError) as exc:
-            raise HTTPException(
-                status_code=status.HTTP_502_BAD_GATEWAY,
-                detail="Unable to obtain Meta AI access token. Region may be blocked.",
-            ) from exc
-
-        self._session.access_token = token
-        self._session.persist()
-        await asyncio.sleep(1)  # Let Meta register cookies server-side
-        return token
-
-    # ------------------------------------------------------------------
-    # Request building
-    # ------------------------------------------------------------------
-
-    def _build_send_payload(self, message: str) -> dict:
-        """Construct the GraphQL payload for sending a message.
+    def _build_chat_payload(self, message: str, doc_id: str) -> dict:
+        """Construct the GraphQL JSON payload for chat.
 
         Args:
-            message: The user's text message.
+            message: User's text message.
+            doc_id: GraphQL persisted query doc_id.
 
         Returns:
-            Dictionary ready for urlencode.
+            Dictionary payload for the POST request.
         """
         if not self._session.external_conversation_id:
             self._session.external_conversation_id = str(uuid.uuid4())
 
-        self._session.offline_threading_id = _generate_offline_threading_id()
-
-        variables = {
-            "message": {"sensitive_string_value": message},
-            "externalConversationId": self._session.external_conversation_id,
-            "offlineThreadingId": self._session.offline_threading_id,
-            "suggestedPromptIndex": None,
-            "flashVideoRecapInput": {"images": []},
-            "flashPreviewInput": None,
-            "promptPrefix": None,
-            "entrypoint": "ABRA__CHAT__TEXT",
-            "icebreaker_type": "TEXT",
-            "__relay_internal__pv__AbraDebugDevOnlyrelayprovider": False,
-            "__relay_internal__pv__WebPixelRatiorelayprovider": 1,
+        return {
+            "doc_id": doc_id,
+            "variables": {
+                "conversationId": self._session.external_conversation_id,
+                "content": message,
+                "userMessageId": str(uuid.uuid4()),
+                "assistantMessageId": str(uuid.uuid4()),
+                "userUniqueMessageId": str(uuid.uuid4().int)[:19],
+                "turnId": str(uuid.uuid4()),
+                "mode": "create",
+                "isNewConversation": True,
+                "clientTimezone": "America/New_York",
+                "entryPoint": "KADABRA__UNKNOWN",
+                "promptSessionId": str(uuid.uuid4()),
+                "userAgent": USER_AGENT,
+                "currentBranchPath": "0",
+                "promptEditType": "new_message",
+                "userLocale": "en-US",
+                "attachments": None,
+                "attachmentsV2": None,
+                "mentions": None,
+                "rewriteOptions": None,
+                "imagineOperationRequest": None,
+            },
         }
 
-        payload = {
-            "access_token": self._session.access_token,
-            "fb_api_caller_class": "RelayModern",
-            "fb_api_req_friendly_name": "useAbraSendMessageMutation",
-            "variables": json.dumps(variables),
-            "server_timestamps": "true",
-            "doc_id": doc_ids["send_message"],
-        }
-        return payload
+    @staticmethod
+    def _extract_text_from_dict(obj: dict) -> str | None:
+        """Try common text fields in a message dictionary."""
+        for key in ("content", "text"):
+            val = obj.get(key)
+            if isinstance(val, str):
+                return val
+        composed = obj.get("composed_text", {})
+        if isinstance(composed, dict):
+            items = composed.get("content", [])
+            if isinstance(items, list):
+                return "\n".join(
+                    i.get("text", "") for i in items if isinstance(i, dict)
+                )
+        return None
+
+    @classmethod
+    def _extract_message_from_event(cls, event: dict) -> str:
+        """Pull assistant text from a Meta AI SSE event."""
+        if not isinstance(event, dict):
+            return ""
+        data = event.get("data", {})
+        if not isinstance(data, dict):
+            return ""
+
+        # Check sendMessageStream -> message
+        stream = data.get("sendMessageStream", {})
+        if isinstance(stream, dict):
+            msg = stream.get("message", {})
+            if isinstance(msg, dict):
+                text = cls._extract_text_from_dict(msg)
+                if text is not None:
+                    return text
+
+        # Check message directly
+        msg = data.get("message", {})
+        if isinstance(msg, dict):
+            text = cls._extract_text_from_dict(msg)
+            if text is not None:
+                return text
+
+        # Check node -> bot_response_message
+        node = data.get("node", {})
+        if isinstance(node, dict):
+            bot = node.get("bot_response_message", {})
+            if isinstance(bot, dict):
+                text = cls._extract_text_from_dict(bot)
+                if text is not None:
+                    return text
+
+        return ""
+
+    @staticmethod
+    def _extract_conversation_id(event: dict) -> str | None:
+        """Extract conversation ID from an SSE event."""
+        if not isinstance(event, dict):
+            return None
+        data = event.get("data", {})
+        if not isinstance(data, dict):
+            return None
+        stream = data.get("sendMessageStream", {})
+        if isinstance(stream, dict):
+            cid = stream.get("conversationId")
+            if isinstance(cid, str) and cid:
+                return cid
+        return None
 
     def _build_openai_response(
         self,
@@ -471,75 +368,123 @@ class MuseClient:
             try:
                 return await self._chat_completion_once(request)
             except HTTPException:
-                raise  # Don't retry client-side validation errors
+                raise
             except Exception as exc:
                 last_error = exc
                 if attempt < _MAX_RETRIES:
                     delay = _jittered_delay(attempt)
                     await asyncio.sleep(delay)
-                    # Wipe potentially stale state and try again
                     self._session.clear()
+                    self._load_cookies_from_settings()
 
         raise HTTPException(
             status_code=status.HTTP_502_BAD_GATEWAY,
-            detail=f"Meta AI failed after {_MAX_RETRIES} retries: {last_error!s}",
+            detail=(
+                f"Meta AI failed after {_MAX_RETRIES} retries: "
+                f"{last_error!s}"
+            ),
         ) from last_error
 
-    async def _chat_completion_once(
+    async def _chat_completion_once(  # noqa: PLR0912
         self,
         request: ChatCompletionRequest,
     ) -> ChatCompletionResponse:
         """Single attempt at non-streaming completion."""
-        await self._get_access_token()
+        token = await self._get_access_token()
         http = await self._get_http()
 
         message_text = "\n".join(
             f"{msg.role}: {msg.content}" for msg in request.messages
         )
 
-        payload = self._build_send_payload(message_text)
         headers = {
-            "content-type": "application/x-www-form-urlencoded",
-            "x-fb-friendly-name": "useAbraSendMessageMutation",
+            "cookie": self._get_cookie_header(),
+            "authorization": f"OAuth {token}",
+            "content-type": "application/json",
+            "origin": META_AI_BASE,
+            "referer": f"{META_AI_BASE}/",
+            "accept": "text/event-stream, application/json",
+            "accept-language": "en-US,en;q=0.9",
         }
 
-        resp = await http.post(
-            META_AI_GRAPHQL_GRAPH,
-            data=payload,
-            headers=headers,
-        )
-        resp.raise_for_status()
+        last_snapshot = ""
+        yielded = False
+        last_errors: list[dict] = []
 
-        last_line = None
-        for line in resp.text.splitlines():
-            if not line.strip():
-                continue
+        for doc_id in _CHAT_DOC_IDS:
+            payload = self._build_chat_payload(message_text, doc_id)
+
             try:
-                json_line = json.loads(line)
-            except json.JSONDecodeError:
+                resp = await http.post(
+                    META_AI_GRAPHQL,
+                    headers=headers,
+                    json=payload,
+                )
+                resp.raise_for_status()
+            except httpx.HTTPStatusError as exc:
+                if exc.response.status_code == status.HTTP_401_UNAUTHORIZED:
+                    raise HTTPException(
+                        status_code=status.HTTP_401_UNAUTHORIZED,
+                        detail="Meta AI authentication failed. "
+                        "Please refresh your cookies.",
+                    ) from exc
+                last_errors.append({
+                    "doc_id": doc_id,
+                    "status": exc.response.status_code,
+                })
                 continue
-            bot_msg = (
-                json_line.get("data", {})
-                .get("node", {})
-                .get("bot_response_message", {})
-            )
-            streaming_state = bot_msg.get("streaming_state")
-            if streaming_state == "OVERALL_DONE":
-                last_line = json_line
-                chat_id = bot_msg.get("id")
-                if chat_id and "_" in chat_id:
-                    parts = chat_id.split("_")
-                    self._session.external_conversation_id = parts[0]
-                    self._session.offline_threading_id = parts[1]
 
-        if last_line is None:
+            # Parse SSE response
+            for raw_line in resp.text.splitlines():
+                line = raw_line.strip()
+                if not line or line.startswith("event:"):
+                    continue
+
+                data = line[5:].strip() if line.startswith("data:") else line
+                if data in ("[DONE]", "null", ""):
+                    continue
+
+                try:
+                    event = json.loads(data)
+                except json.JSONDecodeError:
+                    continue
+
+                # Track conversation ID
+                conv_id = self._extract_conversation_id(event)
+                if conv_id:
+                    self._session.external_conversation_id = conv_id
+
+                # Extract text
+                snapshot = self._extract_message_from_event(event)
+                if not snapshot:
+                    continue
+
+                if not last_snapshot:
+                    delta = snapshot
+                elif snapshot.startswith(last_snapshot):
+                    delta = snapshot[len(last_snapshot):]
+                elif snapshot == last_snapshot:
+                    delta = ""
+                else:
+                    delta = snapshot
+
+                last_snapshot = snapshot
+                if delta.strip():
+                    yielded = True
+
+            if yielded:
+                return self._build_openai_response(request, last_snapshot.strip())
+
+        if last_errors:
             raise HTTPException(
                 status_code=status.HTTP_502_BAD_GATEWAY,
-                detail="Meta AI returned an empty or unexpected response.",
+                detail=f"Meta AI GraphQL errors: {last_errors}",
             )
 
-        text = _format_bot_response(last_line)
-        return self._build_openai_response(request, text)
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail="Meta AI returned an empty or unexpected response.",
+        )
 
     async def chat_completion_stream(
         self,
@@ -567,88 +512,112 @@ class MuseClient:
                     delay = _jittered_delay(attempt)
                     await asyncio.sleep(delay)
                     self._session.clear()
+                    self._load_cookies_from_settings()
 
         raise HTTPException(
             status_code=status.HTTP_502_BAD_GATEWAY,
             detail=(
-                f"Meta AI streaming failed after {_MAX_RETRIES} retries: {last_error!s}"
+                f"Meta AI streaming failed after {_MAX_RETRIES} "
+                f"retries: {last_error!s}"
             ),
         ) from last_error
 
-    async def _chat_completion_stream_once(
+    async def _chat_completion_stream_once(  # noqa: PLR0912
         self,
         request: ChatCompletionRequest,
     ) -> AsyncGenerator[ChatCompletionStreamResponse]:
         """Single attempt at streaming completion."""
-        await self._get_access_token()
+        token = await self._get_access_token()
         http = await self._get_http()
 
         message_text = "\n".join(
             f"{msg.role}: {msg.content}" for msg in request.messages
         )
 
-        payload = self._build_send_payload(message_text)
         headers = {
-            "content-type": "application/x-www-form-urlencoded",
-            "x-fb-friendly-name": "useAbraSendMessageMutation",
+            "cookie": self._get_cookie_header(),
+            "authorization": f"OAuth {token}",
+            "content-type": "application/json",
+            "origin": META_AI_BASE,
+            "referer": f"{META_AI_BASE}/",
+            "accept": "text/event-stream, application/json",
+            "accept-language": "en-US,en;q=0.9",
         }
 
         completion_id = f"chatcmpl-{uuid.uuid4().hex[:12]}"
         created = int(time.time())
         model = request.model
+        last_snapshot = ""
+        yielded_any = False
 
-        try:
-            async with http.stream(
-                "POST",
-                META_AI_GRAPHQL_GRAPH,
-                data=payload,
-                headers=headers,
-            ) as resp:
-                resp.raise_for_status()
-                async for raw_line in resp.aiter_lines():
-                    if not raw_line.strip():
-                        continue
-                    try:
-                        json_line = json.loads(raw_line)
-                    except json.JSONDecodeError:
-                        continue
+        for doc_id in _CHAT_DOC_IDS:
+            payload = self._build_chat_payload(message_text, doc_id)
 
-                    bot_msg = (
-                        json_line.get("data", {})
-                        .get("node", {})
-                        .get("bot_response_message", {})
-                    )
-                    text = _format_bot_response(json_line)
-                    if not text:
-                        continue
+            try:
+                async with http.stream(
+                    "POST",
+                    META_AI_GRAPHQL,
+                    headers=headers,
+                    json=payload,
+                ) as resp:
+                    resp.raise_for_status()
 
-                    yield ChatCompletionStreamResponse(
-                        id=completion_id,
-                        created=created,
-                        model=model,
-                        choices=[
-                            StreamChoice(
-                                index=0,
-                                delta=DeltaMessage(content=text),
-                            ),
-                        ],
-                    )
+                    async for raw_line in resp.aiter_lines():
+                        line = raw_line.strip()
+                        if not line or line.startswith("event:"):
+                            continue
 
-                    chat_id = bot_msg.get("id")
-                    if chat_id and "_" in chat_id:
-                        parts = chat_id.split("_")
-                        self._session.external_conversation_id = parts[0]
-                        self._session.offline_threading_id = parts[1]
-        except httpx.HTTPStatusError as exc:
-            raise HTTPException(
-                status_code=status.HTTP_502_BAD_GATEWAY,
-                detail=f"Meta AI upstream error: {exc.response.status_code}",
-            ) from exc
-        except httpx.RequestError as exc:
-            raise HTTPException(
-                status_code=status.HTTP_504_GATEWAY_TIMEOUT,
-                detail=f"Meta AI unreachable: {exc!s}",
-            ) from exc
+                        data = line[5:].strip() if line.startswith("data:") else line
+                        if data in ("[DONE]", "null", ""):
+                            continue
+
+                        try:
+                            event = json.loads(data)
+                        except json.JSONDecodeError:
+                            continue
+
+                        conv_id = self._extract_conversation_id(event)
+                        if conv_id:
+                            self._session.external_conversation_id = conv_id
+
+                        snapshot = self._extract_message_from_event(event)
+                        if not snapshot:
+                            continue
+
+                        if not last_snapshot:
+                            delta = snapshot
+                        elif snapshot.startswith(last_snapshot):
+                            delta = snapshot[len(last_snapshot):]
+                        elif snapshot == last_snapshot:
+                            delta = ""
+                        else:
+                            delta = snapshot
+
+                        last_snapshot = snapshot
+                        if delta.strip():
+                            yielded_any = True
+                            yield ChatCompletionStreamResponse(
+                                id=completion_id,
+                                created=created,
+                                model=model,
+                                choices=[
+                                    StreamChoice(
+                                        index=0,
+                                        delta=DeltaMessage(content=delta),
+                                    ),
+                                ],
+                            )
+            except httpx.HTTPStatusError as exc:
+                if exc.response.status_code == status.HTTP_401_UNAUTHORIZED:
+                    raise HTTPException(
+                        status_code=status.HTTP_401_UNAUTHORIZED,
+                        detail="Meta AI authentication failed. "
+                        "Please refresh your cookies.",
+                    ) from exc
+                continue
+
+            if yielded_any:
+                break
 
         yield ChatCompletionStreamResponse(
             id=completion_id,

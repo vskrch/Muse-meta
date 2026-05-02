@@ -31,6 +31,10 @@ class Settings(BaseSettings):
     port: int = 8000
     meta_username: str = ""
     meta_password: str = ""
+    meta_ai_datr: str = ""
+    meta_ai_ecto_1_sess: str = ""
+    meta_ai_abra_sess: str = ""
+    meta_ai_access_token: str = ""
     request_timeout: float = 60.0
 
 

@@ -56,7 +56,7 @@ MUSE_API_KEY=your_meta_ai_api_key_here
 uvicorn muse_meta.main:app --reload --host 0.0.0.0 --port 8000
 
 # Or with the run script
-python -m muse_meta.main
+python3 -m muse_meta.main
 ```
 
 The API will be available at `http://localhost:8000`.

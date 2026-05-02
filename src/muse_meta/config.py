@@ -29,8 +29,8 @@ class Settings(BaseSettings):
     debug: bool = False
     host: str = "0.0.0.0"
     port: int = 8000
-    muse_base_url: str = "https://www.meta.ai/api"
-    muse_api_key: str = ""
+    meta_username: str = ""
+    meta_password: str = ""
     request_timeout: float = 60.0
 
 

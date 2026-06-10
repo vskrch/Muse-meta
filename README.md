@@ -109,9 +109,50 @@ Deployment notes:
 - Keep `/v1/*` behind bearer-token auth and rotate `API_KEY` on exposure.
 - Keep `.env`, `.state/`, browser profiles, and request captures out of git,
   images, logs, and support bundles.
+- Persist `STATE_DIR` on a private volume owned by the service user if you want
+  upstream session state to survive restarts.
 - Run multiple replicas at the platform level if you need higher availability;
   the included rate limiter is per process.
 - Use `/health` for liveness and `/ready` for configuration readiness.
+- If any token, cookie, HAR file, browser profile, or `.env` file was ever
+  pushed, rotate that credential. Removing it from the current tree does not
+  remove it from git history.
+
+## Production Readiness Checklist
+
+Before exposing this service outside a local machine:
+
+- `ENVIRONMENT=production`, `DEBUG=false`, and `DOCS_ENABLED=false`.
+- `API_KEY` or `API_KEYS` is a long random secret and is not reused elsewhere.
+- `ALLOWED_HOSTS` contains only the real hostnames served by the deployment.
+- `CORS_ALLOW_ORIGINS` is empty unless a browser client truly needs it; never
+  combine wildcard CORS with credentials.
+- `/health` returns `200` from the load balancer and `/ready` returns `200`
+  only after upstream auth is configured.
+- Logs, metrics, proxy access logs, and crash reports do not contain
+  `Authorization`, Cookie, `.env`, or browser-profile data.
+- Request limits and rate limits match your expected traffic, and any external
+  API gateway or WAF enforces stricter limits before traffic reaches the app.
+- Meta account/session credentials are dedicated to authorized testing and can
+  be revoked without impacting personal accounts.
+
+Production smoke test:
+
+```bash
+curl -i https://api.example.com/health
+curl -i https://api.example.com/ready
+curl -i https://api.example.com/v1/models \
+  -H "Authorization: Bearer $API_KEY"
+```
+
+Expected baseline:
+
+- `/health` returns `200`.
+- `/ready` returns `200` only when upstream auth is configured.
+- `/v1/models` returns `401` without a bearer token and `200` with the right
+  token.
+- Responses include `x-content-type-options: nosniff`, `x-frame-options: DENY`,
+  `referrer-policy: no-referrer`, and `cache-control: no-store`.
 
 ## Docker
 

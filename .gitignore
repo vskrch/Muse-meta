@@ -104,7 +104,10 @@ celerybeat.pid
 
 # Environments
 .env
+.env.*
+!.env.example
 tools/.env
+tools/.env.*
 .venv
 env/
 venv/
@@ -114,9 +117,34 @@ venv.bak/
 
 # Local generated auth/profile artifacts
 .state/
+.state*/
 .meta_ai_cookies.json
 .playwright_profile/
 tools/*.jsonl
+*.har
+*cookies*.json
+*storage_state*.json
+
+# Secrets and private key material
+.secrets/
+secrets/
+*.pem
+*.key
+*.p12
+*.pfx
+*.crt
+*.csr
+
+# Local browser/test artifacts
+playwright-report/
+test-results/
+trace.zip
+
+# Local databases/state stores
+*.sqlite
+*.sqlite3
+*.db
+*.db-journal
 
 # Spyder project settings
 .spyderproject

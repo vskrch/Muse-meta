@@ -11,12 +11,13 @@ Usage:
 
 import asyncio
 import json
-from pathlib import Path
 
 from playwright.async_api import async_playwright
 
-COOKIE_FILE = Path(".meta_ai_cookies.json")
-PROFILE_DIR = Path(".playwright_profile").absolute()
+from _paths import cookie_file, profile_dir
+
+COOKIE_FILE = cookie_file()
+PROFILE_DIR = profile_dir()
 USER_AGENT = (
     "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
     "AppleWebKit/537.36 (KHTML, like Gecko) "

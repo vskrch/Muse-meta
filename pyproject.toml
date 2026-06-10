@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "muse-meta"
-version = "0.1.0"
+version = "0.2.0"
 description = "A reverse proxy for Meta AI Muse Spark chat completion as an OpenAI-compatible endpoint."
 readme = "README.md"
 license = {text = "Apache-2.0"}
@@ -42,6 +42,9 @@ dev = [
     "httpx>=0.27.0",
     "mypy>=1.10.0",
 ]
+
+[project.scripts]
+muse-meta = "muse_meta.__main__:main"
 
 [project.urls]
 Homepage = "https://github.com/vskrch/Muse-meta"

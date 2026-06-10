@@ -4,29 +4,27 @@ This router exposes the standard /v1/chat/completions endpoint
 and proxies requests to Meta AI Muse Spark.
 """
 
+from collections.abc import AsyncGenerator
+
 from fastapi import APIRouter, Depends, HTTPException, status
 from fastapi.responses import StreamingResponse
 
-from muse_meta.config import Settings, settings
+from muse_meta.config import Settings
 from muse_meta.models.chat import (
     ChatCompletionRequest,
     ChatCompletionResponse,
 )
+from muse_meta.security import enforce_rate_limit, get_settings, require_api_key
 from muse_meta.services.muse_client import MuseClient, get_muse_client
 
-router = APIRouter(prefix="/v1", tags=["chat"])
+router = APIRouter(
+    prefix="/v1",
+    tags=["chat"],
+    dependencies=[Depends(require_api_key), Depends(enforce_rate_limit)],
+)
 
 
-def _get_settings() -> Settings:
-    """Return application settings for dependency injection.
-
-    Returns:
-        The global settings instance.
-    """
-    return settings
-
-
-def _get_client(dep_settings: Settings = Depends(_get_settings)) -> MuseClient:
+def _get_client(dep_settings: Settings = Depends(get_settings)) -> MuseClient:
     """Return a configured MuseClient for dependency injection.
 
     Args:
@@ -36,6 +34,26 @@ def _get_client(dep_settings: Settings = Depends(_get_settings)) -> MuseClient:
         A MuseClient ready to communicate with the upstream API.
     """
     return get_muse_client(dep_settings)
+
+
+@router.get(
+    "/models",
+    status_code=status.HTTP_200_OK,
+    summary="List available models",
+)
+async def list_models() -> dict[str, object]:
+    """Return the OpenAI-compatible model list."""
+    return {
+        "object": "list",
+        "data": [
+            {
+                "id": "muse-spark",
+                "object": "model",
+                "created": 0,
+                "owned_by": "meta",
+            },
+        ],
+    }
 
 
 @router.post(
@@ -82,7 +100,7 @@ async def create_chat_completion(
 async def _stream_response(
     client: MuseClient,
     request: ChatCompletionRequest,
-) -> StreamingResponse:
+) -> AsyncGenerator[str, None]:
     """Yield server-sent events for streaming completions.
 
     Args:

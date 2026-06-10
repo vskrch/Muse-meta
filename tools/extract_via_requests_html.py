@@ -7,11 +7,12 @@ Usage:
 """
 
 import json
-from pathlib import Path
 
 from requests_html import HTMLSession
 
-COOKIE_FILE = Path(".meta_ai_cookies.json")
+from _paths import cookie_file
+
+COOKIE_FILE = cookie_file()
 
 
 def _extract_value(text: str, start_str: str, end_str: str) -> str:

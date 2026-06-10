@@ -104,12 +104,19 @@ celerybeat.pid
 
 # Environments
 .env
+tools/.env
 .venv
 env/
 venv/
 ENV/
 env.bak/
 venv.bak/
+
+# Local generated auth/profile artifacts
+.state/
+.meta_ai_cookies.json
+.playwright_profile/
+tools/*.jsonl
 
 # Spyder project settings
 .spyderproject

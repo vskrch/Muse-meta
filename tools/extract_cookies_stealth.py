@@ -12,13 +12,14 @@ import contextlib
 import json
 import random
 import time
-from pathlib import Path
 
 from playwright.async_api import async_playwright
 from playwright_stealth.stealth import Stealth
 
-COOKIE_FILE = Path(".meta_ai_cookies.json")
-PROFILE_DIR = Path(".playwright_profile").absolute()
+from _paths import cookie_file, profile_dir
+
+COOKIE_FILE = cookie_file()
+PROFILE_DIR = profile_dir()
 
 
 def _extract_value(text: str, start_str: str, end_str: str) -> str:

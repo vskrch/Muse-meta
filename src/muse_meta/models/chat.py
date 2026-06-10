@@ -8,6 +8,11 @@ from typing import Literal
 
 from pydantic import BaseModel, Field
 
+MAX_MESSAGES = 128
+MAX_MESSAGE_CONTENT_LENGTH = 32_768
+MAX_MODEL_NAME_LENGTH = 128
+MAX_COMPLETION_TOKENS = 8192
+
 
 class ChatMessage(BaseModel):
     """A single message in a chat conversation.
@@ -18,7 +23,7 @@ class ChatMessage(BaseModel):
     """
 
     role: Literal["system", "user", "assistant"] = "user"
-    content: str = ""
+    content: str = Field(default="", max_length=MAX_MESSAGE_CONTENT_LENGTH)
 
 
 class DeltaMessage(BaseModel):
@@ -70,9 +75,9 @@ class Usage(BaseModel):
         total_tokens: Total number of tokens used.
     """
 
-    prompt_tokens: int = 0
-    completion_tokens: int = 0
-    total_tokens: int = 0
+    prompt_tokens: int = Field(default=0, ge=0)
+    completion_tokens: int = Field(default=0, ge=0)
+    total_tokens: int = Field(default=0, ge=0)
 
 
 class ChatCompletionRequest(BaseModel):
@@ -87,10 +92,14 @@ class ChatCompletionRequest(BaseModel):
         top_p: Nucleus sampling parameter.
     """
 
-    model: str = "muse-spark"
-    messages: list[ChatMessage]
+    model: str = Field(
+        default="muse-spark",
+        min_length=1,
+        max_length=MAX_MODEL_NAME_LENGTH,
+    )
+    messages: list[ChatMessage] = Field(min_length=1, max_length=MAX_MESSAGES)
     temperature: float = Field(default=0.7, ge=0.0, le=2.0)
-    max_tokens: int | None = Field(default=None, ge=1)
+    max_tokens: int | None = Field(default=None, ge=1, le=MAX_COMPLETION_TOKENS)
     stream: bool = False
     top_p: float = Field(default=1.0, ge=0.0, le=1.0)
 

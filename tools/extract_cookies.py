@@ -10,11 +10,12 @@ Usage:
 
 import asyncio
 import json
-from pathlib import Path
 
 from playwright.async_api import async_playwright
 
-COOKIE_FILE = Path(".meta_ai_cookies.json")
+from _paths import cookie_file
+
+COOKIE_FILE = cookie_file()
 USER_AGENT = (
     "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
     "AppleWebKit/537.36 (KHTML, like Gecko) "

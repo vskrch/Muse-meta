@@ -18,6 +18,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import json
+import logging
 import random
 import re
 import time
@@ -40,6 +41,8 @@ from muse_meta.models.chat import (
     StreamChoice,
     Usage,
 )
+
+logger = logging.getLogger(__name__)
 
 USER_AGENT = (
     "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
@@ -126,6 +129,11 @@ class MetaAISession:
         with contextlib.suppress(OSError):
             _COOKIE_FILE.unlink(missing_ok=True)
 
+    def reset_auth(self) -> None:
+        """Reset only auth-related state, keeping base cookies."""
+        self.access_token = ""
+        self.external_conversation_id = ""
+
 
 class MuseClient:
     """Async client that proxies OpenAI requests to Meta AI.
@@ -177,10 +185,51 @@ class MuseClient:
         """Build a Cookie header string from session cookies."""
         return "; ".join(f"{k}={v}" for k, v in self._session.cookies.items())
 
+    async def _solve_challenge(self, http: httpx.AsyncClient, challenge_html: str) -> bool:
+        """Solve Meta AI's client-side verification challenge.
+
+        Meta AI returns a 403 page with a JS challenge that POSTs to a
+        verify endpoint. We replicate that here to obtain the rd_challenge cookie.
+
+        Args:
+            http: The shared HTTP client.
+            challenge_html: The HTML body of the 403 challenge response.
+
+        Returns:
+            True if the challenge was solved successfully.
+        """
+        match = re.search(r"fetch\('([^']+)'", challenge_html)
+        if not match:
+            logger.warning("No challenge URL found in response")
+            return False
+
+        challenge_path = match.group(1)
+        challenge_url = f"{META_AI_BASE}{challenge_path}"
+        logger.info("Solving challenge: %s", challenge_path)
+
+        headers = {
+            "cookie": self._get_cookie_header(),
+            "accept": "*/*",
+            "accept-language": "en-US,en;q=0.9",
+            "user-agent": USER_AGENT,
+        }
+
+        try:
+            resp = await http.post(challenge_url, headers=headers)
+            if resp.status_code == 200:
+                # httpx automatically stores set-cookie from the challenge response
+                logger.info("Challenge solved, rd_challenge cookie set")
+                return True
+            logger.warning("Challenge returned status %d", resp.status_code)
+        except Exception:
+            logger.exception("Failed to solve challenge")
+        return False
+
     async def _extract_access_token(self) -> str:
         """Extract OAuth access token from meta.ai page HTML.
 
         Scans the page source for ecto1:... bearer tokens.
+        Handles Meta AI's client-side challenge (403) automatically.
 
         Returns:
             The extracted access token.
@@ -200,6 +249,24 @@ class MuseClient:
             "upgrade-insecure-requests": "1",
         }
         resp = await http.get(META_AI_BASE, headers=headers)
+
+        # Handle 403 client challenge
+        if resp.status_code == 403:
+            if "executeChallenge" in resp.text or "__rd_verify" in resp.text:
+                logger.info("Meta AI returned challenge page, solving...")
+                solved = await self._solve_challenge(http, resp.text)
+                if solved:
+                    # Retry the page load with the challenge cookie
+                    resp = await http.get(META_AI_BASE, headers=headers)
+                else:
+                    raise HTTPException(
+                        status_code=status.HTTP_502_BAD_GATEWAY,
+                        detail="Unable to solve Meta AI verification challenge. "
+                        "Please set META_AI_ACCESS_TOKEN in your .env file.",
+                    )
+            else:
+                resp.raise_for_status()
+
         resp.raise_for_status()
 
         # Search for ecto1 token pattern
@@ -255,7 +322,6 @@ class MuseClient:
                 "attachments": None,
                 "attachmentsV2": None,
                 "mentions": None,
-                "rewriteOptions": None,
                 "imagineOperationRequest": None,
             },
         }
@@ -374,7 +440,7 @@ class MuseClient:
                 if attempt < _MAX_RETRIES:
                     delay = _jittered_delay(attempt)
                     await asyncio.sleep(delay)
-                    self._session.clear()
+                    self._session.reset_auth()
                     self._load_cookies_from_settings()
 
         raise HTTPException(
@@ -431,6 +497,17 @@ class MuseClient:
                 last_errors.append({
                     "doc_id": doc_id,
                     "status": exc.response.status_code,
+                })
+                continue
+
+            # Check for GraphQL errors in the response body
+            resp_data = resp.json()
+            if "errors" in resp_data and not resp_data.get("data"):
+                last_errors.append({
+                    "doc_id": doc_id,
+                    "errors": [
+                        e.get("message", "unknown") for e in resp_data["errors"]
+                    ],
                 })
                 continue
 
@@ -511,7 +588,7 @@ class MuseClient:
                 if attempt < _MAX_RETRIES:
                     delay = _jittered_delay(attempt)
                     await asyncio.sleep(delay)
-                    self._session.clear()
+                    self._session.reset_auth()
                     self._load_cookies_from_settings()
 
         raise HTTPException(

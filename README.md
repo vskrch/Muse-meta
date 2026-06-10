@@ -1,165 +1,179 @@
 # Muse Meta
 
-[![Python 3.11+](https://img.shields.io/badge/python-3.11+-blue.svg)](https://www.python.org/downloads/)
-[![License](https://img.shields.io/badge/license-Apache%202.0-green.svg)](LICENSE)
+Muse Meta is an experimental FastAPI proxy that exposes a limited
+OpenAI-compatible chat completion API over Meta AI web session credentials.
 
-A reverse proxy that exposes **Meta AI Muse Spark** chat completions through an **OpenAI-compatible API**. Built with [FastAPI](https://fastapi.tiangolo.com/) and modern Python practices.
+## Legal And Safety Notice
 
-## Features
+This project is for educational, interoperability, and authorized testing only.
+Use it only with accounts, sessions, systems, and data you are authorized to use.
+You are responsible for complying with applicable laws, platform terms,
+acceptable-use policies, rate limits, and privacy requirements.
 
-- **OpenAI API compatibility** — Drop-in replacement for OpenAI chat completions.
-- **Streaming support** — Real-time server-sent events for responsive UIs.
-- **Fast & async** — Built on `asyncio` and `httpx` for high concurrency.
-- **PEP 20 aligned** — Clean, readable, explicit code with `ruff` linting.
-- **Pydantic v2** — Type-safe request/response models.
+Do not use this project for spam, scraping, credential misuse, evading access
+controls, bypassing service restrictions, abusive automation, harassment,
+fraud, or any activity that harms users, services, or infrastructure. Do not
+deploy it as a public unauthenticated proxy. This software is provided as-is,
+without warranty, and the maintainers are not responsible for misuse or for
+third-party service changes.
+
+This client relies on undocumented web behavior and may stop working without
+notice. Treat all Meta session cookies, access tokens, browser profiles, and
+captured request logs as secrets. If any of those artifacts were ever committed
+or pushed, rotate the affected sessions immediately.
+
+## What It Provides
+
+- OpenAI-style endpoints: `GET /v1/models` and `POST /v1/chat/completions`.
+- Streaming responses using server-sent events.
+- Inbound bearer-token authentication for all `/v1/*` routes.
+- Production config validation that refuses unsafe production settings.
+- Host allowlisting, strict opt-in CORS, security headers, request-size limits,
+  and per-process rate limiting.
+- Health endpoints: `/health` for liveness and `/ready` for configuration
+  readiness.
+- Upstream resilience: bounded retries with jitter, persisted state under
+  `.state/`, doc-id fallback, and challenge retry handling where possible.
 
 ## Quick Start
 
-### Prerequisites
-
-- Python 3.11 or newer
-- A Meta AI Muse Spark API key
-
-### Installation
-
 ```bash
-# Clone the repository
-git clone https://github.com/vskrch/Muse-meta.git
-cd Muse-meta
-
-# Create a virtual environment
 python3 -m venv .venv
-source .venv/bin/activate  # On Windows: .venv\Scripts\activate
-
-# Install in editable mode with dev dependencies
+source .venv/bin/activate
 pip install -e ".[dev]"
-```
-
-### Configuration
-
-Copy the example environment file and fill in your API key:
-
-```bash
 cp .env.example .env
 ```
 
-Edit `.env`:
+Edit `.env` and set at minimum:
 
 ```dotenv
-MUSE_API_KEY=your_meta_ai_api_key_here
+API_KEY=change-this-long-random-token
+META_AI_DATR=your_datr_cookie
+META_AI_ECTO_1_SESS=your_ecto_1_sess_cookie
 ```
 
-### Run the Server
+Run locally:
 
 ```bash
-# Using uvicorn directly
-uvicorn muse_meta.main:app --reload --host 0.0.0.0 --port 8000
-
-# Or with the run script
-python3 -m muse_meta.main
+python3 -m muse_meta
 ```
 
-The API will be available at `http://localhost:8000`.
-
-Visit `http://localhost:8000/docs` for interactive API documentation.
-
-## Usage
-
-### Non-streaming Completion
+Test the API:
 
 ```bash
-curl -X POST http://localhost:8000/v1/chat/completions \
+curl http://localhost:8000/v1/models \
+  -H "Authorization: Bearer change-this-long-random-token"
+```
+
+```bash
+curl http://localhost:8000/v1/chat/completions \
+  -H "Authorization: Bearer change-this-long-random-token" \
   -H "Content-Type: application/json" \
   -d '{
     "model": "muse-spark",
-    "messages": [
-      {"role": "user", "content": "Hello, world!"}
-    ]
+    "messages": [{"role": "user", "content": "Hello"}]
   }'
 ```
 
-### Streaming Completion
+## Production Configuration
+
+Set explicit production values. The app refuses to start in `production` if
+debug is enabled, API auth is disabled, no API key exists, or hosts are
+wildcarded.
+
+```dotenv
+ENVIRONMENT=production
+DEBUG=false
+DOCS_ENABLED=false
+
+REQUIRE_API_KEY=true
+API_KEY=replace-with-a-long-random-secret
+ALLOWED_HOSTS=api.example.com
+CORS_ALLOW_ORIGINS=https://app.example.com
+CORS_ALLOW_CREDENTIALS=false
+
+MAX_REQUEST_BYTES=1048576
+RATE_LIMIT_REQUESTS=60
+RATE_LIMIT_WINDOW_SECONDS=60
+REQUEST_TIMEOUT=60.0
+
+STATE_DIR=/var/lib/muse-meta
+META_AI_DATR=...
+META_AI_ECTO_1_SESS=...
+```
+
+Deployment notes:
+
+- Terminate TLS at a trusted reverse proxy or platform load balancer.
+- Do not enable broad proxy-header trust for internet traffic.
+- Keep `/v1/*` behind bearer-token auth and rotate `API_KEY` on exposure.
+- Keep `.env`, `.state/`, browser profiles, and request captures out of git,
+  images, logs, and support bundles.
+- Run multiple replicas at the platform level if you need higher availability;
+  the included rate limiter is per process.
+- Use `/health` for liveness and `/ready` for configuration readiness.
+
+## Docker
 
 ```bash
-curl -X POST http://localhost:8000/v1/chat/completions \
-  -H "Content-Type: application/json" \
-  -d '{
-    "model": "muse-spark",
-    "messages": [
-      {"role": "user", "content": "Tell me a joke."}
-    ],
-    "stream": true
-  }'
+docker build -t muse-meta .
+docker run --rm -p 8000:8000 --env-file .env muse-meta
 ```
+
+The image installs only runtime API dependencies and runs as a non-root user.
+Local browser extraction tools are not installed into the production image.
+
+## Local Cookie Tools
+
+Install tool dependencies only when you need local credential extraction:
+
+```bash
+pip install -e ".[tools]"
+python3 -m playwright install chromium
+python3 tools/extract_cookies.py
+```
+
+Generated cookies and browser profiles default to `.state/`. These files are
+sensitive and ignored by git.
 
 ## Project Structure
 
-```
-Muse-meta/
-├── src/
-│   └── muse_meta/
-│       ├── __init__.py
-│       ├── main.py              # FastAPI app & lifespan
-│       ├── config.py            # Pydantic settings
-│       ├── models/              # OpenAI-compatible Pydantic models
-│       │   ├── __init__.py
-│       │   └── chat.py
-│       ├── routers/             # API route handlers
-│       │   ├── __init__.py
-│       │   └── chat.py
-│       ├── services/            # External API client
-│       │   ├── __init__.py
-│       │   └── muse_client.py
-│       └── utils/               # Shared helpers
-│           └── __init__.py
-├── tests/                       # Pytest test suite
-├── .env.example
-├── .gitignore
-├── LICENSE
-├── pyproject.toml               # Project config, Ruff, pytest, mypy
-└── README.md
+```text
+.
+├── Dockerfile
+├── README.md
+├── pyproject.toml
+├── src/muse_meta/
+│   ├── __main__.py
+│   ├── config.py
+│   ├── main.py
+│   ├── middleware.py
+│   ├── security.py
+│   ├── models/
+│   ├── routers/
+│   └── services/
+├── tests/
+└── tools/
 ```
 
 ## Development
 
-### Linting & Formatting
-
-This project uses **[Ruff](https://docs.astral.sh/ruff/)** for blazing-fast linting and formatting aligned with PEP 20 principles.
-
 ```bash
-# Check all files
 ruff check .
-
-# Auto-fix issues
-ruff check . --fix
-
-# Format all files
 ruff format .
-```
-
-### Type Checking
-
-```bash
 mypy src
-```
-
-### Running Tests
-
-```bash
 pytest
 ```
 
-## Environment Variables
+Using the bundled virtualenv in this workspace:
 
-| Variable | Default | Description |
-|---|---|---|
-| `MUSE_BASE_URL` | `https://www.meta.ai/api` | Base URL for Meta AI Muse Spark |
-| `MUSE_API_KEY` | *(empty)* | API key for Muse Spark authentication |
-| `HOST` | `0.0.0.0` | Server bind host |
-| `PORT` | `8000` | Server bind port |
-| `DEBUG` | `false` | Enable debug mode |
-| `REQUEST_TIMEOUT` | `60.0` | Upstream request timeout (seconds) |
+```bash
+./venv/bin/python -m ruff check .
+./venv/bin/python -m ruff format .
+./venv/bin/python -m mypy src
+./venv/bin/python -m pytest -q
+```
 
 ## License
 
-This project is licensed under the [Apache License 2.0](LICENSE).
+Apache-2.0. See [LICENSE](LICENSE).

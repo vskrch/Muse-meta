@@ -91,9 +91,9 @@ def _generate_offline_threading_id() -> str:
 
 def _jittered_delay(attempt: int) -> float:
     """Compute exponential backoff delay with jitter."""
-    delay = _BASE_DELAY * (2 ** attempt)
+    delay = _BASE_DELAY * (2**attempt)
     jitter = random.uniform(0, delay * 0.5)
-    return delay + jitter
+    return float(delay + jitter)
 
 
 @dataclass
@@ -227,9 +227,7 @@ class MuseClient:
         if self.settings.meta_ai_datr:
             self._session.cookies["datr"] = self.settings.meta_ai_datr
         if self.settings.meta_ai_ecto_1_sess:
-            self._session.cookies["ecto_1_sess"] = (
-                self.settings.meta_ai_ecto_1_sess
-            )
+            self._session.cookies["ecto_1_sess"] = self.settings.meta_ai_ecto_1_sess
         if self.settings.meta_ai_abra_sess:
             self._session.cookies["abra_sess"] = self.settings.meta_ai_abra_sess
         if self.settings.meta_ai_access_token:
@@ -282,7 +280,8 @@ class MuseClient:
     def _sync_http_cookies(self, http: httpx.AsyncClient) -> None:
         """Copy cookies set by httpx responses into persisted session state."""
         for cookie in http.cookies.jar:
-            self._session.cookies[cookie.name] = cookie.value
+            if cookie.name and cookie.value is not None:
+                self._session.cookies[cookie.name] = cookie.value
 
     def _build_request_headers(
         self,
@@ -753,10 +752,7 @@ class MuseClient:
 
         raise HTTPException(
             status_code=status.HTTP_502_BAD_GATEWAY,
-            detail=(
-                f"Meta AI failed after {_MAX_RETRIES} retries: "
-                f"{last_error!s}"
-            ),
+            detail=(f"Meta AI failed after {_MAX_RETRIES} retries: {last_error!s}"),
         ) from last_error
 
     async def _chat_completion_once(
@@ -793,8 +789,7 @@ class MuseClient:
                     {
                         "doc_id": doc_id,
                         "errors": [
-                            error.get("message", "unknown")
-                            for error in gql_errors
+                            error.get("message", "unknown") for error in gql_errors
                         ],
                     }
                 )
@@ -860,8 +855,7 @@ class MuseClient:
         raise HTTPException(
             status_code=status.HTTP_502_BAD_GATEWAY,
             detail=(
-                f"Meta AI streaming failed after {_MAX_RETRIES} "
-                f"retries: {last_error!s}"
+                f"Meta AI streaming failed after {_MAX_RETRIES} retries: {last_error!s}"
             ),
         ) from last_error
 

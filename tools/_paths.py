@@ -19,9 +19,6 @@ def cookie_file() -> Path:
 def profile_dir() -> Path:
     """Return where Playwright browser profile data should be stored."""
     configured = os.environ.get("MUSE_PLAYWRIGHT_PROFILE_DIR")
-    if configured:
-        path = Path(configured)
-    else:
-        path = state_dir() / "playwright_profile"
+    path = Path(configured) if configured else state_dir() / "playwright_profile"
     path.mkdir(parents=True, exist_ok=True)
     return path.absolute()

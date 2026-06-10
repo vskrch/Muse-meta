@@ -11,9 +11,8 @@ Usage:
 import asyncio
 import json
 
-from playwright.async_api import async_playwright
-
 from _paths import cookie_file
+from playwright.async_api import async_playwright
 
 COOKIE_FILE = cookie_file()
 USER_AGENT = (

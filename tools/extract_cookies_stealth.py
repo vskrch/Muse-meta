@@ -13,10 +13,9 @@ import json
 import random
 import time
 
+from _paths import cookie_file, profile_dir
 from playwright.async_api import async_playwright
 from playwright_stealth.stealth import Stealth
-
-from _paths import cookie_file, profile_dir
 
 COOKIE_FILE = cookie_file()
 PROFILE_DIR = profile_dir()
@@ -167,11 +166,7 @@ def _print_cookie_summary(cookie_dict: dict[str, str]) -> None:
     for name in sorted(cookie_dict.keys()):
         value = cookie_dict[name]
         preview_len = 30
-        preview = (
-            value[:preview_len] + "..."
-            if len(value) > preview_len
-            else value
-        )
+        preview = value[:preview_len] + "..." if len(value) > preview_len else value
         print(f"  {name}: {preview}")
 
     is_authed = "c_user" in cookie_dict or "abra_sess" in cookie_dict

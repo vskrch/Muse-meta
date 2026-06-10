@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-from collections.abc import Awaitable, Callable
-
 from starlette.datastructures import MutableHeaders
 from starlette.responses import JSONResponse
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
@@ -24,10 +22,12 @@ class RequestBodyLimitMiddleware:
     """Reject oversized request bodies before route handlers allocate them."""
 
     def __init__(self, app: ASGIApp, max_body_size: int) -> None:
+        """Initialize the middleware with an application and size limit."""
         self.app = app
         self.max_body_size = max_body_size
 
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        """Handle an ASGI request with request-body byte accounting."""
         if scope["type"] != "http" or self.max_body_size <= 0:
             await self.app(scope, receive, send)
             return
@@ -44,12 +44,12 @@ class RequestBodyLimitMiddleware:
             if message["type"] == "http.request":
                 bytes_seen += len(message.get("body", b""))
                 if bytes_seen > self.max_body_size:
-                    raise RequestBodyTooLarge
+                    raise RequestBodyTooLargeError
             return message
 
         try:
             await self.app(scope, limited_receive, send)
-        except RequestBodyTooLarge:
+        except RequestBodyTooLargeError:
             await self._send_too_large(scope, receive, send)
 
     def _content_length_exceeds_limit(self, scope: Scope) -> bool:
@@ -78,7 +78,7 @@ class RequestBodyLimitMiddleware:
         await response(scope, receive, send)
 
 
-class RequestBodyTooLarge(Exception):
+class RequestBodyTooLargeError(Exception):
     """Raised when a streaming body exceeds the configured limit."""
 
 
@@ -86,9 +86,11 @@ class SecurityHeadersMiddleware:
     """Attach conservative security headers to every HTTP response."""
 
     def __init__(self, app: ASGIApp) -> None:
+        """Initialize the middleware with an ASGI application."""
         self.app = app
 
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        """Handle an ASGI request and attach response headers."""
         if scope["type"] != "http":
             await self.app(scope, receive, send)
             return
@@ -101,6 +103,3 @@ class SecurityHeadersMiddleware:
             await send(message)
 
         await self.app(scope, receive, send_with_headers)
-
-
-SendCallable = Callable[[Message], Awaitable[None]]

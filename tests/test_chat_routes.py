@@ -36,10 +36,7 @@ def test_message_count_is_bounded(client: TestClient) -> None:
         headers={"Authorization": "Bearer test-token"},
         json={
             "model": "muse-spark",
-            "messages": [
-                {"role": "user", "content": "hello"}
-                for _ in range(129)
-            ],
+            "messages": [{"role": "user", "content": "hello"} for _ in range(129)],
         },
     )
 

@@ -1,8 +1,8 @@
 """FastAPI application entry point."""
 
-from contextlib import asynccontextmanager
-from collections.abc import AsyncIterator
 import logging
+from collections.abc import AsyncIterator, Callable
+from contextlib import AbstractAsyncContextManager, asynccontextmanager
 
 from fastapi import FastAPI, HTTPException, Request, status
 from fastapi.middleware.cors import CORSMiddleware
@@ -18,7 +18,9 @@ from muse_meta.services.muse_client import get_muse_client
 logger = logging.getLogger(__name__)
 
 
-def _build_lifespan(app_settings: Settings):
+def _build_lifespan(
+    app_settings: Settings,
+) -> Callable[[FastAPI], AbstractAsyncContextManager[None]]:
     """Build a lifespan context bound to a specific settings object."""
 
     @asynccontextmanager
@@ -120,7 +122,11 @@ def _install_exception_handlers(application: FastAPI) -> None:
         exc: Exception,
     ) -> JSONResponse:
         """Hide internal tracebacks from clients while logging details."""
-        logger.exception("Unhandled request failure: %s %s", request.method, request.url)
+        logger.exception(
+            "Unhandled request failure: %s %s",
+            request.method,
+            request.url,
+        )
         return JSONResponse(
             {"detail": "Internal server error."},
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,

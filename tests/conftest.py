@@ -52,7 +52,7 @@ def app_settings() -> Settings:
         environment="test",
         api_key="test-token",
         allowed_hosts="testserver",
-        max_request_bytes=512,
+        max_request_bytes=65_536,
         rate_limit_requests=0,
     )
 
@@ -61,5 +61,5 @@ def app_settings() -> Settings:
 def client(app_settings: Settings) -> TestClient:
     """Return a configured FastAPI test client."""
     app = create_app(app_settings)
-    app.dependency_overrides[_get_client] = lambda: FakeMuseClient()
+    app.dependency_overrides[_get_client] = FakeMuseClient
     return TestClient(app)

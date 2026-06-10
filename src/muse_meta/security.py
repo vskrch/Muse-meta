@@ -58,6 +58,7 @@ class InMemoryRateLimiter:
     """Small per-process sliding-window limiter for edge-defense layering."""
 
     def __init__(self) -> None:
+        """Initialize empty rate-limit buckets and synchronization state."""
         self._events: dict[str, deque[float]] = {}
         self._lock = asyncio.Lock()
 

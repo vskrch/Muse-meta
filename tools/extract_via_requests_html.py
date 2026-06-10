@@ -8,9 +8,8 @@ Usage:
 
 import json
 
-from requests_html import HTMLSession
-
 from _paths import cookie_file
+from requests_html import HTMLSession
 
 COOKIE_FILE = cookie_file()
 
@@ -73,11 +72,7 @@ def main() -> None:
     preview_len = 30
     for name in sorted(cookies.keys()):
         value = cookies[name]
-        preview = (
-            value[:preview_len] + "..."
-            if len(value) > preview_len
-            else value
-        )
+        preview = value[:preview_len] + "..." if len(value) > preview_len else value
         print(f"  {name}: {preview}")
 
     has_lsd = "lsd" in cookies
